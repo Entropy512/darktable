@@ -1246,6 +1246,13 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 
   // allocate temporary buffer for wavelet transform + blending
   const int wd = roi_in->width, ht = roi_in->height;
+  float **mul_imgs = malloc((d->exposure_fusion+2) * sizeof(float *));
+  for(int e = 0; e <= (d->exposure_fusion+1); e++)
+  {
+    mul_imgs[e] = dt_alloc_align(64, sizeof(float) * 4 * wd * ht);
+  }
+  memset(mul_imgs[d->exposure_fusion+1], 0, sizeof(float) * 4 * wd * ht);
+
   int num_levels = 8;
   float **col = malloc(num_levels * sizeof(float *));
   float **comb = malloc(num_levels * sizeof(float *));
@@ -1273,11 +1280,12 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     // for every exposure fusion image:
     // push by some ev, apply base curve:
     if(d->preserve_colors == DT_RGB_NORM_NONE)
-      apply_legacy_curve(in, col[0], wd, ht, exposure_increment(d->exposure_stops, e, d->exposure_fusion, d->exposure_bias),
+      apply_legacy_curve(in, mul_imgs[e], wd, ht, exposure_increment(d->exposure_stops, e, d->exposure_fusion, d->exposure_bias),
                          d->table, d->unbounded_coeffs);
     else
-      apply_curve(in, col[0], wd, ht, d->preserve_colors, exposure_increment(d->exposure_stops, e, d->exposure_fusion, d->exposure_bias),
+      apply_curve(in, mul_imgs[e], wd, ht, d->preserve_colors, exposure_increment(d->exposure_stops, e, d->exposure_fusion, d->exposure_bias),
                   d->table, d->unbounded_coeffs, work_profile);
+
 
     /*
       convert into an sRGB-ish gamma curve.
@@ -1290,15 +1298,43 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       TODO:  We probably shouldn't hardcode the gamma either, but we need to be careful
       about a nasty case of slider-itis...
     */
-    apply_pow(col[0], wd, ht, 1.0f/2.4f);
+    apply_pow(mul_imgs[e], wd, ht, 1.0f/2.4f);
 
     // compute features - only luminance/"well-exposedness" weighting for now
-    compute_features(col[0], wd, ht, d->exposure_optimum, d->exposure_width);
+    compute_features(mul_imgs[e], wd, ht, d->exposure_optimum, d->exposure_width);
 
-    // create gaussian pyramid of colour buffer
-    w = wd;
-    h = ht;
-    gauss_reduce(col[0], col[1], out, w, h);
+    /*
+      Accumulate normalization of weight maps
+    */
+#ifdef _OPENMP
+#pragma omp parallel for default(none) \
+  dt_omp_firstprivate(ht, wd, mul_imgs, e)      \
+  shared(col)                                   \
+  schedule(static)
+#endif
+    for(size_t k = 0; k < 4* wd * ht; k += 4)
+      mul_imgs[d->exposure_fusion+1][k+3] += mul_imgs[e][k+3];
+  }
+
+  for(int e = 0; e < d->exposure_fusion + 1; e++)
+  {
+    /*
+      Normalize the weight maps
+    */
+#ifdef _OPENMP
+#pragma omp parallel for default(none) \
+  dt_omp_firstprivate(ht, wd, mul_imgs, e)        \
+    shared(col) \
+    schedule(static)
+#endif
+    for(size_t k = 0; k < 4 * wd * ht; k += 4)
+      mul_imgs[e][k+3] /= (mul_imgs[d->exposure_fusion+1][k+3] > 0.0f) ? mul_imgs[d->exposure_fusion+1][k+3] : (float) (d->exposure_fusion+1);
+  }
+
+  for(int e = 0; e < d->exposure_fusion + 1; e++)
+  {
+    memcpy(col[0], mul_imgs[e], sizeof(float) * 4 * wd * ht);
+    dt_free_align(mul_imgs[e]);
 
     /*
       Disable contrast weighting, it's very broken.  It has a potential use case where a user has a nonlinear
@@ -1314,6 +1350,10 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       for fusion.
     */
 #if 0
+    // create gaussian pyramid of colour buffer
+    w = wd;
+    h = ht;
+    gauss_reduce(col[0], col[1], out, w, h);
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
     dt_omp_firstprivate(ht, out, wd) \
@@ -1335,6 +1375,8 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     continue;
 #endif
 
+    w = wd;
+    h = ht;
     for(int k = 1; k < num_levels; k++)
     {
       gauss_reduce(col[k - 1], col[k], 0, w, h);
@@ -1390,6 +1432,7 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       h = (h - 1) / 2 + 1;
     }
 
+#if 0
     // normalise both gaussian base and laplacians:
 #ifdef _OPENMP
 #pragma omp parallel for default(none) shared(comb, w, h, k) schedule(static)
@@ -1397,6 +1440,7 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     for(size_t i = 0; i < (size_t)4 * w * h; i += 4)
       if(comb[k][i + 3] > 1e-8f)
         for(int c = 0; c < 3; c++) comb[k][i + c] /= comb[k][i + 3];
+#endif
 
     if(k < num_levels - 1)
     { // reconstruct output image
@@ -1442,6 +1486,8 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     dt_free_align(col[k]);
     dt_free_align(comb[k]);
   }
+  dt_free_align(mul_imgs[d->exposure_fusion+1]);
+  free(mul_imgs);
   free(col);
   free(comb);
 }
