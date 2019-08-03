@@ -970,7 +970,7 @@ void tiling_callback(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t
   {
     const int rad = MIN(roi_in->width, (int)ceilf(256 * roi_in->scale / piece->iscale));
 
-    tiling->factor = 6.666f;                 // in + out + col[] + comb[] + 2*tmp
+    tiling->factor = 10.666f;                 // in + out + col[] + comb[] + 2*tmp
     tiling->maxbuf = 1.0f;
     tiling->overhead = 0;
     tiling->xalign = 1;
@@ -1243,6 +1243,13 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   float *const out = (float *)ovoid;
   dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)(piece->data);
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+  //FIXME: Make this selectable by the user
+  const dt_iop_order_iccprofile_info_t *const weight_profile
+    = dt_ioppr_add_profile_info_to_list(self->dev, DT_COLORSPACE_SRGB, "", INTENT_PERCEPTUAL);
+  const gboolean transform = (work_profile != NULL && weight_profile != NULL) ? TRUE : FALSE;
+  //FIXME: Make this selectable by the user
+//  const dt_iop_order_iccprofile_info_t *const blend_profile
+//    = dt_ioppr_add_profile_info_to_list(self->dev, DT_COLORSPACE_LAB, "", INTENT_PERCEPTUAL);
 
   // allocate temporary buffer for wavelet transform + blending
   const int wd = roi_in->width, ht = roi_in->height;
@@ -1250,8 +1257,8 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   for(int e = 0; e <= (d->exposure_fusion+1); e++)
   {
     mul_imgs[e] = dt_alloc_align(64, sizeof(float) * 4 * wd * ht);
+    memset(mul_imgs[e], 0, sizeof(float) * 4 * wd * ht);
   }
-  memset(mul_imgs[d->exposure_fusion+1], 0, sizeof(float) * 4 * wd * ht);
 
   int num_levels = 8;
   float **col = malloc(num_levels * sizeof(float *));
@@ -1287,6 +1294,7 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
                   d->table, d->unbounded_coeffs, work_profile);
 
 
+#if 0
     /*
       convert into an sRGB-ish gamma curve.
 
@@ -1299,6 +1307,15 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       about a nasty case of slider-itis...
     */
     apply_pow(mul_imgs[e], wd, ht, 1.0f/2.4f);
+#else
+    if(transform)
+    {
+      dt_print(DT_DEBUG_OPENCL, "[process_fusion] starting conversion to weight profile\n");
+      dt_ioppr_transform_image_colorspace_rgb(mul_imgs[e], mul_imgs[e], wd, ht,
+                                              work_profile, weight_profile, "foo");
+      dt_print(DT_DEBUG_OPENCL, "[process_fusion] finished conversion to weight profile\n");
+    }
+#endif
 
     // compute features - only luminance/"well-exposedness" weighting for now
     compute_features(mul_imgs[e], wd, ht, d->exposure_optimum, d->exposure_width);
@@ -1460,10 +1477,21 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     }
   }
 #endif
+
+#if 0
   /*
     Move our pixels back into linear space before we send them on their merry way.
   */
   apply_pow(comb[0], wd, ht, 2.4f);
+#else
+  if(transform)
+  {
+    dt_print(DT_DEBUG_OPENCL, "[process_fusion] starting conversion from weight profile\n");
+    dt_ioppr_transform_image_colorspace_rgb(comb[0], comb[0], wd, ht,
+                                            weight_profile, work_profile, "foo");
+    dt_print(DT_DEBUG_OPENCL, "[process_fusion] finished conversion from weight profile\n");
+  }
+#endif
 
   // copy output buffer
 #ifdef _OPENMP
