@@ -1247,9 +1247,7 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   const dt_iop_order_iccprofile_info_t *const weight_profile
     = dt_ioppr_add_profile_info_to_list(self->dev, DT_COLORSPACE_SRGB, "", INTENT_PERCEPTUAL);
   const gboolean transform = (work_profile != NULL && weight_profile != NULL) ? TRUE : FALSE;
-  //FIXME: Make this selectable by the user
-//  const dt_iop_order_iccprofile_info_t *const blend_profile
-//    = dt_ioppr_add_profile_info_to_list(self->dev, DT_COLORSPACE_LAB, "", INTENT_PERCEPTUAL);
+  int cs_tmp;
 
   // allocate temporary buffer for wavelet transform + blending
   const int wd = roi_in->width, ht = roi_in->height;
@@ -1310,16 +1308,16 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 #else
     if(transform)
     {
-      dt_print(DT_DEBUG_OPENCL, "[process_fusion] starting conversion to weight profile\n");
       dt_ioppr_transform_image_colorspace_rgb(mul_imgs[e], mul_imgs[e], wd, ht,
                                               work_profile, weight_profile, "foo");
-      dt_print(DT_DEBUG_OPENCL, "[process_fusion] finished conversion to weight profile\n");
     }
 #endif
 
     // compute features - only luminance/"well-exposedness" weighting for now
     compute_features(mul_imgs[e], wd, ht, d->exposure_optimum, d->exposure_width);
-
+    if(transform)
+      dt_ioppr_transform_image_colorspace_rgb(mul_imgs[e], mul_imgs[e], wd, ht,
+                                              weight_profile, work_profile, "foo");
     /*
       Accumulate normalization of weight maps
     */
@@ -1352,6 +1350,11 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   {
     memcpy(col[0], mul_imgs[e], sizeof(float) * 4 * wd * ht);
     dt_free_align(mul_imgs[e]);
+    if(transform)
+      dt_ioppr_transform_image_colorspace(self, col[0], col[0], wd, ht, iop_cs_rgb, iop_cs_Lab,
+                                          &cs_tmp, work_profile);
+
+
 
     /*
       Disable contrast weighting, it's very broken.  It has a potential use case where a user has a nonlinear
@@ -1486,10 +1489,8 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 #else
   if(transform)
   {
-    dt_print(DT_DEBUG_OPENCL, "[process_fusion] starting conversion from weight profile\n");
-    dt_ioppr_transform_image_colorspace_rgb(comb[0], comb[0], wd, ht,
-                                            weight_profile, work_profile, "foo");
-    dt_print(DT_DEBUG_OPENCL, "[process_fusion] finished conversion from weight profile\n");
+    dt_ioppr_transform_image_colorspace(self, comb[0], comb[0], wd, ht, iop_cs_Lab, iop_cs_rgb,
+                                              &cs_tmp, work_profile);
   }
 #endif
 
