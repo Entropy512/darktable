@@ -1150,7 +1150,12 @@ static inline void gauss_blur(
     // left borders
     for(int i=0;i<2;i++) for(int c=0;c<4;c++)
       for(int ii=-2;ii<=2;ii++)
-        tmp[4*(j*wd+i)+c] += input[4*(j*wd+MAX(-i-ii,i+ii))+c] * w[ii+2];
+      {
+        if(i+ii < 0)
+          tmp[4*(j*wd+i)+c] += (2*input[4*j*wd+c] - input[4*(j*wd-(i+ii))+c]) * w[ii+2];
+        else
+          tmp[4*(j*wd+i)+c] += input[4*(j*wd+i+ii)+c] * w[ii+2];
+      }
     // most pixels
     for(int i=2;i<wd-2;i++) for(int c=0;c<4;c++)
       for(int ii=-2;ii<=2;ii++)
@@ -1158,7 +1163,12 @@ static inline void gauss_blur(
     // right borders
     for(int i=wd-2;i<wd;i++) for(int c=0;c<4;c++)
       for(int ii=-2;ii<=2;ii++)
-        tmp[4*(j*wd+i)+c] += input[4*(j*wd+MIN(i+ii, wd-(i+ii-wd+1) ))+c] * w[ii+2];
+      {
+        if(i+ii >= wd)
+          tmp[4*(j*wd+i)+c] += (2*input[4*(j*wd+(wd-1))+c] - input[4*(j*wd+(wd-(i+ii-wd+1)))+c]) * w[ii+2];
+        else
+          tmp[4*(j*wd+i)+c] += input[4*(j*wd+i+ii)+c] * w[ii+2];
+      }
   }
   memset(output, 0, 4*wd*ht*sizeof(float));
 #ifdef _OPENMP
@@ -1171,13 +1181,23 @@ static inline void gauss_blur(
   { // vertical pass
     for(int j=0;j<2;j++) for(int c=0;c<4;c++)
       for(int jj=-2;jj<=2;jj++)
-        output[4*(j*wd+i)+c] += tmp[4*(MAX(-j-jj,j+jj)*wd+i)+c] * w[jj+2];
+      {
+        if(j+jj < 0)
+          output[4*(j*wd+i)+c] += (2*tmp[4*i+c] - tmp[4*(i-(j+jj)*wd)+c]) * w[jj+2];
+        else
+          output[4*(j*wd+i)+c] += tmp[4*((j+jj)*wd+i)+c] * w[jj+2];
+      }
     for(int j=2;j<ht-2;j++) for(int c=0;c<4;c++)
-      for(int jj=-2;jj<=2;jj++)
+        for(int jj=-2;jj<=2;jj++)
         output[4*(j*wd+i)+c] += tmp[4*((j+jj)*wd+i)+c] * w[jj+2];
     for(int j=ht-2;j<ht;j++) for(int c=0;c<4;c++)
       for(int jj=-2;jj<=2;jj++)
-        output[4*(j*wd+i)+c] += tmp[4*(MIN(j+jj, ht-(j+jj-ht+1))*wd+i)+c] * w[jj+2];
+      {
+        if(j+jj >= ht)
+          output[4*(j*wd+i)+c] += (2*tmp[4*((ht-1)*wd+i)+c] - tmp[4*((ht-(j+jj-ht+1))*wd+i)+c]) * w[jj+2];
+        else
+          output[4*(j*wd+i)+c] += tmp[4*((j+jj)*wd+i)+c] * w[jj+2];
+      }
   }
   dt_free_align(tmp);
 }
