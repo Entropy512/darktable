@@ -1090,20 +1090,66 @@ static inline void apply_pow(
   }
 }
 
+/*
+  Move our pixels into and out of a log-encoded space which is more perceptually even.  Greatly improves
+  blending for exposure fusion.  Any attempt to get decent results from blending in linear space has
+  resulted in severe haloing so far.
+*/
+static inline void apply_log(
+    float *const col,
+    const int wd,
+    const int ht)
+{
+#ifdef _OPENMP
+#pragma omp parallel for default(none) \
+  dt_omp_firstprivate(col, ht, wd) \
+  schedule(static) \
+  collapse(2)
+#endif
+  for(int j=0;j<ht;j++) for(int i=0;i<wd;i++)
+  {
+    const size_t x = 4*((size_t)wd*j+i);
+    col[x] = col[x] > 0.0f ? log2f(col[x]+1e-6) : 0.0f;
+    col[x+1] = col[x+1] > 0.0f ? log2f(col[x+1]+1e-6) : 0.0f;
+    col[x+2] = col[x+2] > 0.0f ? log2f(col[x+2]+1e-6) : 0.0f;
+  }
+}
+
+static inline void undo_log(
+    float *const col,
+    const int wd,
+    const int ht)
+{
+#ifdef _OPENMP
+#pragma omp parallel for default(none) \
+  dt_omp_firstprivate(col, ht, wd) \
+  schedule(static) \
+  collapse(2)
+#endif
+  for(int j=0;j<ht;j++) for(int i=0;i<wd;i++)
+  {
+    const size_t x = 4*((size_t)wd*j+i);
+    col[x] = exp2f(col[x])-1e-6;
+    col[x+1] = exp2f(col[x+1])-1e-6;
+    col[x+2] = exp2f(col[x+2])-1e-6;
+  }
+}
+
 static inline void compute_features(
     float *const col,
     const int wd,
     const int ht,
-    const float opt,
+    float opt,
     const float w)
 {
   // features are product of
   // 1) well exposedness
   // 2) saturation
   // 3) local contrast (handled in laplacian form later)
+  opt = log2f(opt);
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
-  dt_omp_firstprivate(col, ht, wd) \
+  dt_omp_firstprivate(col, ht, wd, opt, w)      \
   schedule(static) \
   collapse(2)
 #endif
@@ -1122,8 +1168,8 @@ static inline void compute_features(
     /*
       FIXME:  Use the RGB norms API instead of hardcoding.
     */
-    float lum = (col[x] + col[x+1] + col[x+2])/3.0;
-
+    float lum = 0.2627f*col[x] + 0.678f*col[x+1] + 0.0593f*col[x+2];
+    lum = (lum > 0) ? log2f(lum+1e-8) : log2f(1e-8);
     float v = fabsf(lum-opt);
     const float exp = dt_fast_expf(-v*v/(2.0*w*w));
     col[x+3] = exp;
@@ -1263,11 +1309,13 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   float *const out = (float *)ovoid;
   dt_iop_basecurve_data_t *const d = (dt_iop_basecurve_data_t *)(piece->data);
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(piece->pipe);
+#if 0
   //FIXME: Make this selectable by the user
   const dt_iop_order_iccprofile_info_t *const weight_profile
     = dt_ioppr_add_profile_info_to_list(self->dev, DT_COLORSPACE_SRGB, "", INTENT_PERCEPTUAL);
   const gboolean transform = (work_profile != NULL && weight_profile != NULL) ? TRUE : FALSE;
   int cs_tmp;
+#endif
 
   // allocate temporary buffer for wavelet transform + blending
   const int wd = roi_in->width, ht = roi_in->height;
@@ -1278,11 +1326,11 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     memset(mul_imgs[e], 0, sizeof(float) * 4 * wd * ht);
   }
 
-  int num_levels = 8;
+  int num_levels = 12;
   float **col = malloc(num_levels * sizeof(float *));
   float **comb = malloc(num_levels * sizeof(float *));
   int w = wd, h = ht;
-  const int rad = MIN(wd, (int)ceilf(256 * roi_in->scale / piece->iscale));
+  const int rad = MIN(wd, (int)ceilf(4096 * roi_in->scale / piece->iscale));
   int step = 1;
   for(int k = 0; k < num_levels; k++)
   {
@@ -1325,7 +1373,9 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
       about a nasty case of slider-itis...
     */
     apply_pow(mul_imgs[e], wd, ht, 1.0f/2.4f);
-#else
+#endif
+
+#if 0
     if(transform)
     {
       dt_ioppr_transform_image_colorspace_rgb(mul_imgs[e], mul_imgs[e], wd, ht,
@@ -1335,9 +1385,26 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
 
     // compute features - only luminance/"well-exposedness" weighting for now
     compute_features(mul_imgs[e], wd, ht, d->exposure_optimum, d->exposure_width);
+#if 0
     if(transform)
       dt_ioppr_transform_image_colorspace_rgb(mul_imgs[e], mul_imgs[e], wd, ht,
                                               weight_profile, work_profile, "foo");
+#endif
+
+    //apply_pow(mul_imgs[e], wd, ht, 2.4f);
+
+#if 0
+#ifdef _OPENMP
+#pragma omp parallel for default(none) \
+  dt_omp_firstprivate(ht, wd, mul_imgs, e)      \
+  shared(col)                                   \
+  schedule(static)
+#endif
+    for(size_t k = 0; k < 4* wd * ht; k += 4)
+      for(int c = 0; c < 3; c++)
+        mul_imgs[e][k+c] = CLAMP(mul_imgs[e][k+c], 0.0f, 1.0f);
+#endif
+
     /*
       Accumulate normalization of weight maps
     */
@@ -1370,10 +1437,12 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   {
     memcpy(col[0], mul_imgs[e], sizeof(float) * 4 * wd * ht);
     dt_free_align(mul_imgs[e]);
+#if 0
     if(transform)
       dt_ioppr_transform_image_colorspace(self, col[0], col[0], wd, ht, iop_cs_rgb, iop_cs_Lab,
                                           &cs_tmp, work_profile);
-
+#endif
+    apply_log(col[0], wd, ht);
 
 
     /*
@@ -1506,7 +1575,9 @@ void process_fusion(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
     Move our pixels back into linear space before we send them on their merry way.
   */
   apply_pow(comb[0], wd, ht, 2.4f);
-#else
+#endif
+  undo_log(comb[0], wd, ht);
+#if 0
   if(transform)
   {
     dt_ioppr_transform_image_colorspace(self, comb[0], comb[0], wd, ht, iop_cs_Lab, iop_cs_rgb,
