@@ -367,8 +367,8 @@ static inline void _image_copy(const float *const img_src, const size_t wd, cons
   memcpy(img_dest, img_src, size * sizeof(float));
 }
 
-static inline void _images_div(const float *const img_src1, const size_t wd, const size_t ht, const int ch,
-                               const float *const img_src2, float *const img_dest)
+static inline void _images_norm(const float *const img_src1, const size_t wd, const size_t ht, const int ch,
+                                const float *const img_src2, float *const img_dest, const int n_imgs)
 {
   const size_t size = wd * ht * ch;
 
@@ -379,7 +379,7 @@ static inline void _images_div(const float *const img_src1, const size_t wd, con
 #endif
   for(int i = 0; i < size; i++)
   {
-    if(img_src2[i] != 0.f) img_dest[i] = img_src1[i] / img_src2[i];
+    img_dest[i] = (img_src2[i] > 0.0f) ? img_src1[i] / img_src2[i] : 1.0f/(float) n_imgs;
   }
 }
 
@@ -412,20 +412,6 @@ static inline void _images_add_weighted(const float *const img_src1, const size_
     for(int c = 0; c < ch; c++)
       img_dest[i*ch + c] = img_src1[i*ch + c] + img_src2[i*ch + c] * img_weight[i];
   }
-}
-
-static inline void _image_add(const float *const img_src, const size_t wd, const size_t ht, const int ch,
-                              const float val, float *const img_dest)
-{
-  const size_t size = wd * ht * ch;
-
-#ifdef _OPENMP
-#pragma omp parallel for default(none) \
-  dt_omp_firstprivate(size, val, img_src, img_dest) \
-  schedule(static)
-#endif
-  for(int i = 0; i < size; i++)
-    img_dest[i] = img_src[i] + val;
 }
 
 static void _convolve_symmetric(const float *const img_src, const size_t wd, const size_t ht, const int ch,
@@ -1000,9 +986,19 @@ static void _buil_weight_map(const float *const img_src, const size_t wd, const 
     for(size_t x = 0; x < wd; x++)
     {
       const float *const rgb = img_src + (y * wd * ch) + x * ch;
-
-      const float lum = powf(_grey_projector(rgb, grey_projector, work_profile), exposure_optimum);
+      float lum;
+      if(!(grey_projector == DT_PROJECTOR_LAB_LIGHTNESS))
+        lum = powf(_grey_projector(rgb, grey_projector, work_profile), 0.45);
+      else
+        lum = _grey_projector(rgb, grey_projector, work_profile);
       img_map[y * wd + x] = _well_exposedness(lum, exposure_optimum, exposure_width, exposure_left_cutoff, exposure_right_cutoff);
+      const float ma = fmax(fmax(rgb[0],rgb[1]),rgb[2]);
+      const float mn = fmin(fmin(rgb[0],rgb[1]),rgb[2]);
+      if(ma == mn)
+        img_map[y * wd + x] = 0.0f;
+      else
+        img_map[y * wd + x] *= powf((ma-mn)/(ma+mn),0.2);
+
     }
   }
 }
@@ -1053,11 +1049,10 @@ static void _exposure_fusion(const float *const img_src, const size_t wd, const 
   // add all the rest
   for(int n = 1; n < num_exposures; n++)
     _images_add(img_dest, img_wmaps[n].w, img_wmaps[n].h, img_wmaps[n].ch, img_wmaps[n].img, img_dest);
-  // avoid division by zero
-  _image_add(img_dest, img_wmaps[0].w, img_wmaps[0].h, img_wmaps[0].ch, 1.0E-12, img_dest);
+
   // normalize all the maps
   for(int n = 0; n < num_exposures; n++)
-    _images_div(img_wmaps[n].img, img_wmaps[n].w, img_wmaps[n].h, img_wmaps[n].ch, img_dest, img_wmaps[n].img);
+    _images_norm(img_wmaps[n].img, img_wmaps[n].w, img_wmaps[n].h, img_wmaps[n].ch, img_dest, img_wmaps[n].img, num_exposures);
 
   // now create a laplacian pyramid with the weighted sum of the laplacian of each image
   // weighted with the gaussian of the weight maps
